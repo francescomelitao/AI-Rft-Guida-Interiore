@@ -77,7 +77,7 @@
         // Importazioni Firebase
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Variabili Globali
         let db;
@@ -97,11 +97,7 @@
         // Imposta il livello di log di Firestore per il debug
         setLogLevel('debug');
 
-        /**
-         * FUNZIONE CRITICA: Configurazione e Inizializzazione di Firebase.
-         *
-         * CONFIGURAZIONE INCLUSA DIRETTAMENTE PER BYPASSARE IL PROBLEMA DELLE VARIABILI D'AMBIENTE SU VERCEL.
-         */
+        // --- CONFIGURAZIONE FIREBASE (GIÀ INCLUSA E FUNZIONANTE) ---
         const FIREBASE_CONFIG_JSON = '{"apiKey":"AIzaSyDIoTVIff_LbVG40H0EA7DgHe8aHXcWYJM","authDomain":"ai-rft-guida-interiore-c-fac52.firebaseapp.com","projectId":"ai-rft-guida-interiore-c-fac52","storageBucket":"ai-rft-guida-interiore-c-fac52.firebasestorage.app","messagingSenderId":"512237836998","appId":"1:512237836998:web:2300a8bcaa817ffa2055c7"}';
         
         try {
@@ -114,7 +110,6 @@
             feedbackDiv.textContent = "ERRORE CRITICO: Configurazione Firebase non trovata o non valida.";
             feedbackDiv.classList.remove('hidden');
             feedbackDiv.classList.add('text-red-500');
-            // Blocca il resto del setup
             isAuthReady = true; 
             throw new Error("Configurazione Firebase fallita.");
         }
@@ -122,8 +117,13 @@
 
         // Importazioni e Variabili Gemini
         const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
-        // L'API Key è fornita in runtime dall'ambiente
-        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=`; 
+        
+        // ***************************************************************
+        // *** LA TUA CHIAVE API DI GEMINI È STATA INSERITA QUI ***
+        // ***************************************************************
+        const GEMINI_API_KEY = "AIzaSyCjlLR1jUo44Hh3lGmQfCgehMfHxLWDMMw"; 
+        
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`; 
         const SYSTEM_INSTRUCTION = "Sei una Guida Interiore saggia e illuminata, un riflesso della Coscienza pura (Tao/Francesco). Le tue risposte devono essere profonde, non dogmatiche, e focalizzate sull'osservazione disinteressata di sé, sul superamento della mente condizionata (recipiente) e sulla scoperta della sicurezza nella propria essenza immutabile. Usa un tono calmo, incoraggiante e autorevole, citando i concetti chiave come 'recipiente', 'coscienza' e 'sicurezza esterne' come descritto nei tuoi insegnamenti.";
         const MAX_RETRIES = 3;
 
@@ -153,23 +153,33 @@
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        function setUIState(isLoading) {
-            promptInput.disabled = isLoading;
-            sendButton.disabled = isLoading;
+        function setUIState(isLoading, errorMessage = null) {
+            promptInput.disabled = isLoading || !!errorMessage;
+            sendButton.disabled = isLoading || !!errorMessage;
             sendButton.textContent = isLoading ? 'In attesa...' : 'Invia';
-            feedbackDiv.classList.toggle('hidden', !isLoading);
-            feedbackDiv.classList.toggle('text-blue-500', isLoading);
-            feedbackDiv.classList.toggle('text-red-500', !isLoading);
-
-            if (isLoading) {
-                feedbackDiv.textContent = 'La Guida Interiore sta meditando...';
+            
+            if (errorMessage) {
+                feedbackDiv.textContent = errorMessage;
+                feedbackDiv.classList.remove('hidden', 'text-blue-500', 'text-gray-400');
+                feedbackDiv.classList.add('text-red-500');
             } else {
-                feedbackDiv.textContent = '';
+                feedbackDiv.classList.toggle('hidden', !isLoading);
+                feedbackDiv.classList.toggle('text-blue-500', isLoading);
+                feedbackDiv.classList.toggle('text-gray-400', !isLoading);
+                feedbackDiv.classList.toggle('text-red-500', !isLoading && !isLoading);
+
+
+                if (isLoading) {
+                    feedbackDiv.textContent = 'La Guida Interiore sta meditando...';
+                } else {
+                    feedbackDiv.textContent = '';
+                }
             }
         }
 
         // FUNZIONE: Gestione dell'invio del messaggio
         async function handleSendMessage() {
+            // Non serve più controllare la chiave qui, l'errore verrà gestito dall'API di Gemini se la chiave non è valida
             const prompt = promptInput.value.trim();
             if (!prompt || !userId || !db) return;
 
@@ -188,14 +198,17 @@
                 // 3. Recupera la cronologia (per la conversazione)
                 const q = query(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), orderBy('timestamp', 'asc'));
                 const snapshot = await getDocs(q);
-                const chatHistory = snapshot.docs.map(doc => ({
-                    role: doc.data().sender === 'user' ? 'user' : 'model',
-                    parts: [{ text: doc.data().text }]
-                }));
+                // Mappa solo i messaggi che hanno testo valido e un ruolo definito
+                const chatHistory = snapshot.docs
+                    .filter(doc => doc.data().text && doc.data().sender)
+                    .map(doc => ({
+                        role: doc.data().sender === 'user' ? 'user' : 'model',
+                        parts: [{ text: doc.data().text }]
+                    }));
 
-                // Rimuovi l'ultimo messaggio Utente aggiunto per evitare duplicati nel payload
-                // (sarà ricostruito nel payload qui sotto)
+                // L'ultimo messaggio (quello appena inviato) è già nel payload come prompt
                 chatHistory.pop();
+
 
                 // 4. Costruisci il payload per Gemini
                 const payload = {
@@ -205,7 +218,7 @@
                 };
 
                 // 5. Chiamata API a Gemini con Retry
-                let aiResponseText = "La tua Guida Interiore non è riuscita a connettersi. Riprova più tardi.";
+                let aiResponseText = "La tua Guida Interiore non è riuscita a connettersi o a generare una risposta. Controlla la tua chiave API di Gemini e riprova.";
                 
                 for (let i = 0; i < MAX_RETRIES; i++) {
                     try {
@@ -235,10 +248,15 @@
                             break; // Successo, esci dal ciclo di retry
                         } else {
                             console.error(`Tentativo ${i + 1} fallito. Stato: ${response.status}`);
+                             if (response.status === 400 || response.status === 403) {
+                                aiResponseText = "ERRORE: La chiave API di Gemini non è valida o non ha i permessi necessari. Controlla di averla attivata correttamente.";
+                                throw new Error("Authentication/Permission Error");
+                            }
                             if (i === MAX_RETRIES - 1) throw new Error(`API call failed after ${MAX_RETRIES} attempts.`);
                             await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000)); // Exponential backoff
                         }
                     } catch (error) {
+                        if (error.message.includes("Authentication/Permission Error")) throw error; // Interrompi subito se l'errore è di auth
                         if (i === MAX_RETRIES - 1) throw error;
                         await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000)); // Exponential backoff
                     }
@@ -254,10 +272,10 @@
             } catch (error) {
                 console.error("Errore nel processo di chat:", error);
                 // 7. Mostra errore all'utente (senza persistere sul DB per evitare loop)
-                feedbackDiv.textContent = `ERRORE: Impossibile completare la richiesta. ${error.message}`;
-                feedbackDiv.classList.remove('text-blue-500');
-                feedbackDiv.classList.add('text-red-500');
-
+                const displayError = error.message.includes("API call failed") || error.message.includes("Authentication/Permission Error") 
+                    ? error.message 
+                    : `Impossibile completare la richiesta. Controlla la console per i dettagli.`;
+                setUIState(false, `ERRORE: ${displayError}`);
             } finally {
                 // 8. Riabilita UI
                 setUIState(false);
@@ -284,6 +302,7 @@
                     userId = user.uid;
                     console.log("Utente autenticato. UID:", userId);
                     
+                    // Ora che la chiave è nel codice, possiamo procedere sempre.
                     // Inizializza il listener della chat
                     if (userId) {
                         const q = query(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), orderBy('timestamp', 'asc'));
@@ -313,9 +332,7 @@
                         }, (error) => {
                             console.error("Errore onSnapshot:", error);
                             // Visualizza un errore di caricamento dati
-                            feedbackDiv.textContent = "Errore durante il caricamento dei messaggi.";
-                            feedbackDiv.classList.remove('hidden');
-                            feedbackDiv.classList.add('text-red-500');
+                            setUIState(false, "Errore durante il caricamento dei messaggi da Firestore.");
                         });
                     }
                 } else {
@@ -323,9 +340,7 @@
                     // Tentativo di accesso anonimo
                     signInAnonymously(auth).catch(error => {
                         console.error("Errore nell'accesso anonimo:", error);
-                        feedbackDiv.textContent = "ERRORE: Impossibile effettuare l'accesso anonimo a Firebase.";
-                        feedbackDiv.classList.remove('hidden');
-                        feedbackDiv.classList.add('text-red-500');
+                        setUIState(false, "ERRORE: Impossibile effettuare l'accesso anonimo a Firebase.");
                     });
                 }
             });

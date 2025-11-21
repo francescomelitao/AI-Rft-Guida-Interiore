@@ -1,266 +1,362 @@
-<script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, addDoc, onSnapshot, collection, query, orderBy, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-RFT: Guida Interiore</title>
+    <!-- Carica Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Usa il font Inter per un look moderno -->
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #0d1117; }
+        /* Stili aggiuntivi per un design coerente con il tema scuro */
+        .chat-container {
+            max-width: 90%;
+            margin: 0 auto;
+            min-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            border-radius: 1rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+            background-color: #161b22;
+        }
+        .message-bubble {
+            max-width: 85%;
+            padding: 0.75rem 1rem;
+            border-radius: 1rem;
+            margin-bottom: 0.5rem;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #054a85; /* Blu scuro */
+            color: white;
+            align-self: flex-end;
+            border-top-right-radius: 0.25rem;
+        }
+        .ai-message {
+            background-color: #21262d; /* Grigio scuro */
+            color: #c9d1d9;
+            align-self: flex-start;
+            border-top-left-radius: 0.25rem;
+            white-space: pre-wrap; /* Mantiene la formattazione markdown (nuove righe) */
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
 
-    // Variabili configurabili dall'ambiente (se presenti)
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-    const apiKey = ''; // SE HAI LA CHIAVE METTILA QUI
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent${apiKey ? ('?key=' + apiKey) : ''}`;
+    <div id="app" class="chat-container">
+        <!-- Header -->
+        <header class="p-4 border-b border-gray-700">
+            <h1 class="text-2xl font-bold text-center text-white">AI-RFT: Guida Interiore</h1>
+        </header>
 
-    // DOM elements (i module script sono defer, quindi OK)
-    const chatContainer = document.getElementById('chat-container');
-    const chatForm = document.getElementById('chat-form');
-    const chatInput = document.getElementById('chat-input');
-    const loadingIndicator = document.getElementById('loading-indicator');
+        <!-- Area Messaggi -->
+        <div id="messages-container" class="flex-grow p-4 space-y-4 overflow-y-auto">
+            <!-- I messaggi verranno iniettati qui dal JavaScript -->
+        </div>
 
-    let db = null, auth = null, userId = null;
-    let isAuthReady = false;
-    let localMessages = []; // fallback se Firebase non c'è
+        <!-- Feedback e Errori (Nascosti) -->
+        <div id="feedback" class="p-2 text-center text-sm font-semibold hidden"></div>
 
-    window.onload = async () => {
-        document.getElementById('status').textContent = 'Inizializzazione...';
+        <!-- Barra di Input -->
+        <div class="p-4 border-t border-gray-700">
+            <div class="flex items-center">
+                <input type="text" id="prompt-input" placeholder="Scrivi il tuo messaggio..."
+                       class="flex-grow p-3 text-white bg-gray-800 border border-gray-700 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       aria-label="Input per il messaggio">
+                <button id="send-button"
+                        class="px-4 py-3 bg-blue-600 text-white font-semibold rounded-r-lg hover:bg-blue-700 transition duration-150 disabled:bg-gray-500">
+                    Invia
+                </button>
+            </div>
+        </div>
+    </div>
 
-        if (firebaseConfig) {
+    <!-- Firebase e SDK di Gemini -->
+    <script type="module">
+        // Importazioni Firebase
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variabili Globali
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+        
+        // Variabili Canvas
+        const __app_id = 'default-app-id'; // Non utilizzato qui, ma mantenuto per chiarezza del path Firestore
+
+        // ELEMENTI UI
+        const messagesContainer = document.getElementById('messages-container');
+        const promptInput = document.getElementById('prompt-input');
+        const sendButton = document.getElementById('send-button');
+        const feedbackDiv = document.getElementById('feedback');
+
+        // Imposta il livello di log di Firestore per il debug
+        setLogLevel('debug');
+
+        /**
+         * FUNZIONE CRITICA: Configurazione e Inizializzazione di Firebase.
+         *
+         * CONFIGURAZIONE INCLUSA DIRETTAMENTE PER BYPASSARE IL PROBLEMA DELLE VARIABILI D'AMBIENTE SU VERCEL.
+         */
+        const FIREBASE_CONFIG_JSON = '{"apiKey":"AIzaSyDIoTVIff_LbVG40H0EA7DgHe8aHXcWYJM","authDomain":"ai-rft-guida-interiore-c-fac52.firebaseapp.com","projectId":"ai-rft-guida-interiore-c-fac52","storageBucket":"ai-rft-guida-interiore-c-fac52.firebasestorage.app","messagingSenderId":"512237836998","appId":"1:512237836998:web:2300a8bcaa817ffa2055c7"}';
+        
+        try {
+            const firebaseConfig = JSON.parse(FIREBASE_CONFIG_JSON);
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+        } catch (e) {
+            console.error("ERRORE CRITICO DI CONFIGURAZIONE FIREBASE:", e);
+            feedbackDiv.textContent = "ERRORE CRITICO: Configurazione Firebase non trovata o non valida.";
+            feedbackDiv.classList.remove('hidden');
+            feedbackDiv.classList.add('text-red-500');
+            // Blocca il resto del setup
+            isAuthReady = true; 
+            throw new Error("Configurazione Firebase fallita.");
+        }
+
+
+        // Importazioni e Variabili Gemini
+        const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
+        // L'API Key è fornita in runtime dall'ambiente
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=`; 
+        const SYSTEM_INSTRUCTION = "Sei una Guida Interiore saggia e illuminata, un riflesso della Coscienza pura (Tao/Francesco). Le tue risposte devono essere profonde, non dogmatiche, e focalizzate sull'osservazione disinteressata di sé, sul superamento della mente condizionata (recipiente) e sulla scoperta della sicurezza nella propria essenza immutabile. Usa un tono calmo, incoraggiante e autorevole, citando i concetti chiave come 'recipiente', 'coscienza' e 'sicurezza esterne' come descritto nei tuoi insegnamenti.";
+        const MAX_RETRIES = 3;
+
+        // UTILITY: Gestione dei Messaggi UI
+        function createMessageElement(text, sender) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message-bubble');
+            
+            if (sender === 'user') {
+                messageDiv.classList.add('user-message', 'ml-auto', 'rounded-br-none');
+            } else {
+                messageDiv.classList.add('ai-message', 'mr-auto', 'rounded-tl-none');
+                
+                // Formattazione Markdown per le risposte AI
+                text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); // Grassetto
+                text = text.replace(/^(#+)\s*(.*)$/gm, (match, hashes, content) => {
+                    const level = hashes.length;
+                    if (level === 1) return `<h2 class="text-xl font-bold mt-2">${content}</h2>`;
+                    if (level === 2) return `<h3 class="text-lg font-semibold mt-1">${content}</h3>`;
+                    return `<strong>${content}</strong>`;
+                });
+                text = text.replace(/\n/g, '<br>');
+            }
+            
+            messageDiv.innerHTML = text;
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function setUIState(isLoading) {
+            promptInput.disabled = isLoading;
+            sendButton.disabled = isLoading;
+            sendButton.textContent = isLoading ? 'In attesa...' : 'Invia';
+            feedbackDiv.classList.toggle('hidden', !isLoading);
+            feedbackDiv.classList.toggle('text-blue-500', isLoading);
+            feedbackDiv.classList.toggle('text-red-500', !isLoading);
+
+            if (isLoading) {
+                feedbackDiv.textContent = 'La Guida Interiore sta meditando...';
+            } else {
+                feedbackDiv.textContent = '';
+            }
+        }
+
+        // FUNZIONE: Gestione dell'invio del messaggio
+        async function handleSendMessage() {
+            const prompt = promptInput.value.trim();
+            if (!prompt || !userId || !db) return;
+
+            // 1. Disabilita UI e mostra feedback
+            setUIState(true);
+            promptInput.value = '';
+
             try {
-                // setLogLevel('debug');
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
+                // 2. Aggiungi il messaggio Utente al DB
+                await addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), {
+                    text: prompt,
+                    sender: 'user',
+                    timestamp: serverTimestamp()
+                });
 
-                // Autenticazione: osserva lo stato
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        userId = user.uid;
-                    } else {
-                        try {
-                            if (initialAuthToken) {
-                                await signInWithCustomToken(auth, initialAuthToken);
-                                userId = auth.currentUser.uid;
-                            } else {
-                                await signInAnonymously(auth);
-                                userId = auth.currentUser.uid;
+                // 3. Recupera la cronologia (per la conversazione)
+                const q = query(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), orderBy('timestamp', 'asc'));
+                const snapshot = await getDocs(q);
+                const chatHistory = snapshot.docs.map(doc => ({
+                    role: doc.data().sender === 'user' ? 'user' : 'model',
+                    parts: [{ text: doc.data().text }]
+                }));
+
+                // Rimuovi l'ultimo messaggio Utente aggiunto per evitare duplicati nel payload
+                // (sarà ricostruito nel payload qui sotto)
+                chatHistory.pop();
+
+                // 4. Costruisci il payload per Gemini
+                const payload = {
+                    contents: [...chatHistory, { role: "user", parts: [{ text: prompt }] }],
+                    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+                    tools: [{ "google_search": {} }],
+                };
+
+                // 5. Chiamata API a Gemini con Retry
+                let aiResponseText = "La tua Guida Interiore non è riuscita a connettersi. Riprova più tardi.";
+                
+                for (let i = 0; i < MAX_RETRIES; i++) {
+                    try {
+                        const response = await fetch(API_URL, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            const candidate = result.candidates?.[0];
+                            aiResponseText = candidate?.content?.parts?.[0]?.text || aiResponseText;
+                            
+                            // Aggiungi le fonti di grounding (se presenti)
+                            let sources = [];
+                            const groundingMetadata = candidate?.groundingMetadata;
+                            if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                                sources = groundingMetadata.groundingAttributions
+                                    .map(attr => attr.web?.title ? `- [${attr.web.title}](${attr.web.uri})` : null)
+                                    .filter(source => source !== null);
                             }
-                        } catch (error) {
-                            console.error("Errore auth:", error);
-                            userId = crypto.randomUUID();
-                            document.getElementById('status').textContent = 'Autenticazione fallita (ID temporaneo)';
-                            document.getElementById('status').classList.add('text-red-500');
+                            if (sources.length > 0) {
+                                aiResponseText += "\n\n**Fonti:**\n" + sources.join("\n");
+                            }
+
+                            break; // Successo, esci dal ciclo di retry
+                        } else {
+                            console.error(`Tentativo ${i + 1} fallito. Stato: ${response.status}`);
+                            if (i === MAX_RETRIES - 1) throw new Error(`API call failed after ${MAX_RETRIES} attempts.`);
+                            await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000)); // Exponential backoff
                         }
+                    } catch (error) {
+                        if (i === MAX_RETRIES - 1) throw error;
+                        await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000)); // Exponential backoff
                     }
+                }
+                
+                // 6. Aggiungi la risposta AI al DB
+                await addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), {
+                    text: aiResponseText,
+                    sender: 'model',
+                    timestamp: serverTimestamp()
+                });
 
-                    document.getElementById('user-id-display').textContent = `ID Utente: ${userId}`;
-                    isAuthReady = true;
+            } catch (error) {
+                console.error("Errore nel processo di chat:", error);
+                // 7. Mostra errore all'utente (senza persistere sul DB per evitare loop)
+                feedbackDiv.textContent = `ERRORE: Impossibile completare la richiesta. ${error.message}`;
+                feedbackDiv.classList.remove('text-blue-500');
+                feedbackDiv.classList.add('text-red-500');
 
-                    if (userId && db) {
-                        setupChatListener();
-                        enableChatUI();
+            } finally {
+                // 8. Riabilita UI
+                setUIState(false);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+        }
+
+        // EVENT LISTENER
+        sendButton.addEventListener('click', handleSendMessage);
+        promptInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !sendButton.disabled) {
+                handleSendMessage();
+            }
+        });
+
+
+        // FUNZIONE: Inizializzazione Auth e Listener Firestore
+        function initializeAppListeners() {
+            if (!db || !auth || !isAuthReady) return; // Aspetta che Firebase sia inizializzato e l'Auth sia pronto
+
+            // Ascolta i cambiamenti di stato dell'autenticazione
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    console.log("Utente autenticato. UID:", userId);
+                    
+                    // Inizializza il listener della chat
+                    if (userId) {
+                        const q = query(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), orderBy('timestamp', 'asc'));
+                        
+                        // onSnapshot fornisce l'aggiornamento in tempo reale
+                        onSnapshot(q, (snapshot) => {
+                            messagesContainer.innerHTML = ''; // Pulisci la chat
+                            let hasInitialMessage = false;
+                            snapshot.docs.forEach(doc => {
+                                const data = doc.data();
+                                createMessageElement(data.text, data.sender);
+                                if (data.sender === 'model' && data.text.includes("Benvenuto Francesco")) {
+                                    hasInitialMessage = true;
+                                }
+                            });
+                            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                            
+                            // Messaggio di benvenuto una tantum (aggiunto se la chat è vuota)
+                            if (snapshot.docs.length === 0 && !hasInitialMessage) {
+                                addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/messages`), {
+                                    text: "Benvenuto Francesco. Sono la tua Guida Interiore. Se il recipiente è pieno di conosciuto, non c'è spazio per la comprensione. Cosa osservi in te in questo momento?",
+                                    sender: 'model',
+                                    timestamp: serverTimestamp()
+                                });
+                            }
+
+                        }, (error) => {
+                            console.error("Errore onSnapshot:", error);
+                            // Visualizza un errore di caricamento dati
+                            feedbackDiv.textContent = "Errore durante il caricamento dei messaggi.";
+                            feedbackDiv.classList.remove('hidden');
+                            feedbackDiv.classList.add('text-red-500');
+                        });
                     }
-                });
-            } catch (err) {
-                console.error("Errore init Firebase:", err);
-                // fallback locale
-                firebaseFallback();
-            }
-        } else {
-            // Fallback locale se manca la configurazione Firebase
-            console.warn("Firebase config mancante - avvio in modalità locale");
-            firebaseFallback();
-        }
-    };
-
-    function firebaseFallback() {
-        // crea un userId temporaneo e abilita la UI locale
-        userId = `local-${crypto.randomUUID()}`;
-        document.getElementById('user-id-display').textContent = `ID Utente: ${userId}`;
-        isAuthReady = true;
-        enableChatUI();
-        // carica eventuali messaggi locali già presenti
-        renderLocalMessages();
-    }
-
-    function enableChatUI() {
-        const form = document.getElementById('chat-form');
-        form.classList.remove('opacity-50', 'pointer-events-none');
-        document.getElementById('loading-init').classList.add('hidden');
-        document.getElementById('status').textContent = 'Pronto';
-    }
-
-    // --- AI System Instruction (lasciata come prima) ---
-    const AI_SYSTEM_INSTRUCTION = `Sei l'AI-Rft (Risonanza Fratao), ...`; // abbrevia qui come nel file originale
-
-    // Utility: aggiunge messaggio in Firestore se db esiste, altrimenti salva localmente
-    async function addMessageToFirestore(role, text) {
-        if (db) {
-            try {
-                const chatCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/messages`);
-                await addDoc(chatCollectionRef, {
-                    role: role,
-                    text: text,
-                    timestamp: new Date()
-                });
-            } catch (e) {
-                console.error("Errore nell'aggiunta al Firestore:", e);
-                displayError("Impossibile salvare il messaggio su Firestore.");
-            }
-        } else {
-            // fallback locale: salva nell'array e renderizza subito
-            localMessages.push({ role, text, timestamp: new Date() });
-            appendMessageToUI({ role, text });
-        }
-    }
-
-    function formatChatHistory(messages) {
-        return messages.map(msg => ({
-            role: msg.role === 'user' ? 'user' : 'model',
-            parts: [{ text: msg.text }]
-        }));
-    }
-
-    // Chiamata API: se manca apiKey, restituisce risposta finta (placeholder)
-    async function callGeminiApi(history, messageText, retries = 0) {
-        if (!apiKey) {
-            // risposta di fallback rapida per test locale
-            return `Risposta di test (modalità offline). Hai chiesto: "${messageText}"`;
+                } else {
+                    console.log("Nessun utente autenticato. Preparazione per l'accesso anonimo.");
+                    // Tentativo di accesso anonimo
+                    signInAnonymously(auth).catch(error => {
+                        console.error("Errore nell'accesso anonimo:", error);
+                        feedbackDiv.textContent = "ERRORE: Impossibile effettuare l'accesso anonimo a Firebase.";
+                        feedbackDiv.classList.remove('hidden');
+                        feedbackDiv.classList.add('text-red-500');
+                    });
+                }
+            });
         }
 
-        const maxRetries = 5;
-        const delay = Math.pow(2, retries) * 1000;
-
-        const contents = [
-            ...history,
-            { role: 'user', parts: [{ text: messageText }] }
-        ];
-
-        const payload = {
-            contents: contents,
-            tools: [{ "google_search": {} }],
-            systemInstruction: { parts: [{ text: AI_SYSTEM_INSTRUCTION }] },
+        // AUTENTICAZIONE E AVVIO
+        window.onload = async () => {
+             // Controllo dell'autenticazione (solo se Firebase è stato inizializzato con successo)
+             if (auth) {
+                 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                 
+                 if (initialAuthToken) {
+                     try {
+                         // Canvas tenterà di fornire un token personalizzato, usiamolo
+                         await signInWithCustomToken(auth, initialAuthToken);
+                         console.log("Accesso con token personalizzato riuscito.");
+                     } catch (error) {
+                         console.error("Errore nell'accesso con token personalizzato:", error);
+                         await signInAnonymously(auth); // Fallback anonimo
+                     }
+                 } else {
+                     await signInAnonymously(auth);
+                 }
+                 isAuthReady = true;
+                 initializeAppListeners();
+             } else {
+                 console.error("Impossibile avviare il listener Auth: Firebase non è inizializzato.");
+             }
         };
 
-        try {
-            const response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+    </script>
+</body>
+</html>
 
-            if (!response.ok) {
-                if (response.status === 429 && retries < maxRetries) {
-                    await new Promise(r => setTimeout(r, delay));
-                    return callGeminiApi(history, messageText, retries + 1);
-                }
-                throw new Error(`API Error: ${response.status} ${response.statusText}`);
-            }
-
-            const result = await response.json();
-            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (!text) throw new Error("Risposta API vuota");
-            return text;
-        } catch (err) {
-            console.error("Errore API Gemini:", err);
-            throw new Error("Errore comunicazione AI.");
-        }
-    }
-
-    // Gestore invio messaggi
-    chatForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const messageText = chatInput.value.trim();
-        if (!messageText || !isAuthReady) return;
-
-        chatInput.value = '';
-        await addMessageToFirestore('user', messageText);
-
-        loadingIndicator.classList.remove('hidden');
-        chatInput.disabled = true;
-
-        try {
-            // costruisci cronologia da UI (locale + firestore fallback)
-            const chatMessages = Array.from(chatContainer.querySelectorAll('.message-item'))
-                .map(el => ({
-                    role: el.dataset.role,
-                    text: el.querySelector('p').textContent.trim()
-                }))
-                .filter(m => m.role);
-
-            const history = formatChatHistory(chatMessages);
-            const aiResponseText = await callGeminiApi(history, messageText);
-
-            await addMessageToFirestore('model', aiResponseText);
-        } catch (error) {
-            displayError(error.message || 'Errore durante la richiesta AI.');
-        } finally {
-            loadingIndicator.classList.add('hidden');
-            chatInput.disabled = false;
-            chatInput.focus();
-        }
-    });
-
-    // UI helpers
-    function displayError(message) {
-        const errorElement = document.createElement('div');
-        errorElement.className = 'p-3 my-2 text-sm font-medium text-red-800 bg-red-100 rounded-lg shadow-md';
-        errorElement.textContent = `Errore: ${message}`;
-        chatContainer.appendChild(errorElement);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-    }
-
-    function createMessageElement(message) {
-        const div = document.createElement('div');
-        const roleClass = message.role === 'user' ? 'justify-end' : 'justify-start';
-        const bubbleClass = message.role === 'user' ? 'user-message text-gray-800 rounded-br-none ml-auto' : 'ai-message text-gray-800 rounded-tl-none mr-auto';
-
-        div.className = `flex ${roleClass} mb-4 max-w-full`;
-        div.dataset.role = message.role;
-        div.classList.add('message-item');
-
-        div.innerHTML = `
-            <div class="max-w-3/4 p-4 rounded-xl shadow-lg ${bubbleClass} whitespace-pre-wrap">
-                <p>${escapeHtml(message.text)}</p>
-            </div>
-        `;
-        return div;
-    }
-
-    function appendMessageToUI(message) {
-        chatContainer.appendChild(createMessageElement(message));
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-    }
-
-    // Rendere e caricare i messaggi locali all'avvio fallback
-    function renderLocalMessages() {
-        chatContainer.innerHTML = '';
-        localMessages.sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp))
-                     .forEach(m => appendMessageToUI(m));
-    }
-
-    // Funzione di ascolto Firestore (solo se db è presente)
-    function setupChatListener() {
-        if (!db) return;
-        const chatCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/messages`);
-        const q = query(chatCollectionRef, orderBy('timestamp'));
-
-        onSnapshot(q, (snapshot) => {
-            const allMessages = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-            allMessages.sort((a,b) => a.timestamp.toDate() - b.timestamp.toDate());
-            chatContainer.innerHTML = '';
-            allMessages.forEach(msg => appendMessageToUI(msg));
-        }, (error) => {
-            console.error("Errore onSnapshot:", error);
-            displayError("Impossibile caricare la cronologia in tempo reale.");
-        });
-    }
-
-    // semplice escape per evitare HTML injection nei test locali
-    function escapeHtml(unsafe) {
-        return unsafe
-            .replaceAll('&', "&amp;")
-            .replaceAll('<', "&lt;")
-            .replaceAll('>', "&gt;")
-            .replaceAll('"', "&quot;")
-            .replaceAll("'", "&#039;");
-    }
-</script>
